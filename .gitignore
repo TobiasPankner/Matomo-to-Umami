@@ -1,0 +1,5 @@
+.idea
+data
+*.sql
+/venv
+/matomo-to-umami-test/npm
