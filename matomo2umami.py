@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-"""
-Script to migrate Matomo analytics data directly to Umami SQL format.
-Downloads data from Matomo API and converts to PostgreSQL INSERT statements on-the-fly.
-Memory-efficient processing without storing intermediate JSON files.
-"""
-
 import argparse
 import hashlib
 import sys
@@ -22,8 +15,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRe
 from rich.table import Table
 
 
-def extract_base_domain(url):
-    """Extract base domain from URL"""
+def extract_base_domain(url: str):
     try:
         extracted = tldextract.extract(url)
         return f"{extracted.domain}.{extracted.suffix}"
@@ -183,7 +175,7 @@ def create_website_event_insert(action: Dict, visit_data: Dict, visit_id: str, w
     # Created timestamp
     created_at = parse_timestamp(action['timestamp'])
 
-    # Event type (1 for pageview based on schema default)
+    # Event type 1 for pageview
     event_type = 1
 
     # Hostname extraction
@@ -266,7 +258,6 @@ def parse_date(date_string: str) -> date:
 
 def migrate_matomo_to_umami(matomo_url: str, site_id: str, token_auth: str, website_id: str,
                             start_date: date = None, end_date: date = None, output_file: str = "migration.sql"):
-    """Main migration function"""
     console = Console()
 
     # Validate website_id is a valid UUID format
@@ -398,16 +389,16 @@ def main():
         epilog="""
 Examples:
   # Default: last 2 years
-  python migrate.py https://tracking.example.com 1 abc123token def456uuid
+  python migrate.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID>
   
   # Custom date range
-  python migrate.py https://tracking.example.com 1 abc123token def456uuid --start-date 2023-01-01 --end-date 2023-12-31
+  python migrate.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> --start-date 2023-01-01 --end-date 2023-12-31
   
   # With custom output file
-  python migrate.py https://tracking.example.com 1 abc123token def456uuid -o my_migration.sql
+  python migrate.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> -o my_migration.sql
   
   # Specific month
-  python migrate.py https://tracking.example.com 1 abc123token def456uuid --start-date 2024-01-01 --end-date 2024-01-31
+  python migrate.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> --start-date 2024-01-01 --end-date 2024-01-31
         """
     )
 
