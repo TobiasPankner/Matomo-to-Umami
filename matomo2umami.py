@@ -389,16 +389,16 @@ def main():
         epilog="""
 Examples:
   # Default: last 2 years
-  python migrate.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID>
+  python matomo2umami.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID>
   
   # Custom date range
-  python migrate.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> --start-date 2023-01-01 --end-date 2023-12-31
+  python matomo2umami.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> --start-date 2023-01-01 --end-date 2023-12-31
   
   # With custom output file
-  python migrate.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> -o my_migration.sql
+  python matomo2umami.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> -o my_migration.sql
   
   # Specific month
-  python migrate.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> --start-date 2024-01-01 --end-date 2024-01-31
+  python matomo2umami.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> --start-date 2024-01-01 --end-date 2024-01-31
         """
     )
 
