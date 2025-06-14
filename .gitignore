@@ -2,4 +2,4 @@
 data
 *.sql
 /venv
-/matomo-to-umami-test/npm
+/matomo-to-umami-preview/npm

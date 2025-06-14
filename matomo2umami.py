@@ -3,7 +3,7 @@ import hashlib
 import sys
 import uuid
 from datetime import datetime, date, timedelta
-from typing import Dict, Any
+from typing import Dict, Any, List, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -32,7 +32,7 @@ def generate_uuid(seed_value: str = None) -> str:
     return str(uuid.uuid4())
 
 
-def safe_sql_string(value: Any) -> str:
+def safe_sql_value(value: Any) -> str:
     """Safely format a value for SQL insertion"""
     if value is None:
         return 'NULL'
@@ -111,8 +111,8 @@ def parse_user_agent_info(visit_data: Dict) -> Dict[str, str]:
     }
 
 
-def create_session_insert(visit_data: Dict, website_id: str, session_mapping: Dict) -> str:
-    """Create INSERT statement for session table"""
+def create_session_data(visit_data: Dict, website_id: str, session_mapping: Dict) -> Tuple[str, List[str]]:
+    """Create session data tuple for batch insert"""
     session_id = generate_uuid(f"session_{visit_data['idVisit']}")
     session_mapping[visit_data['idVisit']] = session_id
 
@@ -132,13 +132,27 @@ def create_session_insert(visit_data: Dict, website_id: str, session_mapping: Di
     # Use first action timestamp for session creation
     created_at = parse_timestamp(visit_data['firstActionTimestamp'])
 
-    return f"""INSERT INTO session (session_id, website_id, browser, os, device, screen, language, country, region, city, distinct_id, created_at) 
-VALUES ({safe_sql_string(session_id)}, {safe_sql_string(website_id)}, {safe_sql_string(ua_info['browser'])}, {safe_sql_string(ua_info['os'])}, {safe_sql_string(ua_info['device'])}, {safe_sql_string(screen)}, {safe_sql_string(language)}, {safe_sql_string(country)}, {safe_sql_string(region)}, {safe_sql_string(city)}, {'NULL'}, {created_at});"""
+    values = [
+        safe_sql_value(session_id),
+        safe_sql_value(website_id),
+        safe_sql_value(ua_info['browser']),
+        safe_sql_value(ua_info['os']),
+        safe_sql_value(ua_info['device']),
+        safe_sql_value(screen),
+        safe_sql_value(language),
+        safe_sql_value(country),
+        safe_sql_value(region),
+        safe_sql_value(city),
+        'NULL',  # distinct_id
+        created_at
+    ]
+
+    return session_id, values
 
 
-def create_website_event_insert(action: Dict, visit_data: Dict, visit_id: str, website_id: str,
-                                session_mapping: Dict) -> str:
-    """Create INSERT statement for website_event table"""
+def create_website_event_data(action: Dict, visit_data: Dict, visit_id: str, website_id: str,
+                              session_mapping: Dict) -> List[str]:
+    """Create website event data tuple for batch insert"""
     event_id = uuid.uuid4()
     session_id = session_mapping[visit_data['idVisit']]
 
@@ -183,8 +197,39 @@ def create_website_event_insert(action: Dict, visit_data: Dict, visit_id: str, w
     if url.startswith('http'):
         hostname = url.split('/')[2][:100]
 
-    return f"""INSERT INTO website_event (event_id, website_id, session_id, visit_id, created_at, url_path, url_query, referrer_path, referrer_query, referrer_domain, page_title, event_type, hostname) 
-VALUES ({safe_sql_string(event_id)}, {safe_sql_string(website_id)}, {safe_sql_string(session_id)}, {safe_sql_string(visit_id)}, {created_at}, {safe_sql_string(url_path)}, {safe_sql_string(url_query)}, {safe_sql_string(referrer_path)}, {safe_sql_string(referrer_query)}, {safe_sql_string(referrer_domain)}, {safe_sql_string(page_title)}, {event_type}, {safe_sql_string(hostname)});"""
+    return [
+        safe_sql_value(event_id),
+        safe_sql_value(website_id),
+        safe_sql_value(session_id),
+        safe_sql_value(visit_id),
+        created_at,
+        safe_sql_value(url_path),
+        safe_sql_value(url_query),
+        safe_sql_value(referrer_path),
+        safe_sql_value(referrer_query),
+        safe_sql_value(referrer_domain),
+        safe_sql_value(page_title),
+        str(event_type),
+        safe_sql_value(hostname)
+    ]
+
+
+def write_batch_insert(output_file, table_name: str, columns: List[str], values_batch: List[List[str]],
+                       batch_size: int = 1000):
+    """Write batch INSERT statements to file"""
+    if not values_batch:
+        return
+
+    # Write in batches to avoid extremely long SQL statements
+    for i in range(0, len(values_batch), batch_size):
+        batch = values_batch[i:i + batch_size]
+
+        # Create the INSERT statement
+        columns_str = ', '.join(columns)
+        values_str = ',\n    '.join([f"({', '.join(row)})" for row in batch])
+
+        sql = f"INSERT INTO {table_name} ({columns_str}) VALUES\n    {values_str};\n\n"
+        output_file.write(sql)
 
 
 def make_matomo_request(matomo_url: str, site_id: str, token_auth: str, target_date: str):
@@ -209,41 +254,66 @@ def make_matomo_request(matomo_url: str, site_id: str, token_auth: str, target_d
         return None
 
 
-def process_day_data(data: list, target_date: date, website_id: str, session_mapping: Dict, output_file) -> int:
-    """Process one day's data and write SQL statements directly to file"""
-    if not isinstance(data, list):
-        return 0
+def process_batch_data(all_data: List[Tuple[date, list]], website_id: str, session_mapping: Dict,
+                       output_file, batch_size: int = 1000) -> int:
+    """Process all collected data and write batch SQL statements"""
+    session_columns = [
+        'session_id', 'website_id', 'browser', 'os', 'device', 'screen', 'language',
+        'country', 'region', 'city', 'distinct_id', 'created_at'
+    ]
 
+    event_columns = [
+        'event_id', 'website_id', 'session_id', 'visit_id', 'created_at', 'url_path',
+        'url_query', 'referrer_path', 'referrer_query', 'referrer_domain', 'page_title',
+        'event_type', 'hostname'
+    ]
+
+    session_batch = []
+    event_batch = []
     events_count = 0
 
-    # Write day header
-    output_file.write(f"-- Processing data for: {target_date.isoformat()}\n")
-    output_file.write("\n")
-
-    for visit_data in data:
-        try:
-            # Skip if this session was already processed (duplicate visit ID)
-            if visit_data['idVisit'] not in session_mapping:
-                session_sql = create_session_insert(visit_data, website_id, session_mapping)
-                output_file.write(session_sql + "\n")
-
-            # Generate visit ID for this session
-            visit_id = generate_uuid(f"visit_{visit_data['idVisit']}")
-
-            # Process actions (page views)
-            if 'actionDetails' in visit_data:
-                for action in visit_data['actionDetails']:
-                    if action.get('type') == 'action':  # Page view
-                        event_sql = create_website_event_insert(action, visit_data, visit_id, website_id,
-                                                                session_mapping)
-                        output_file.write(event_sql + "\n")
-                        events_count += 1
-
-            output_file.write("\n")  # Add empty line between visits
-
-        except Exception as e:
-            print(f"Error processing visit {visit_data.get('idVisit', 'unknown')} on {target_date}: {e}")
+    for target_date, data in all_data:
+        if not isinstance(data, list):
             continue
+
+        for visit_data in data:
+            try:
+                # Skip if this session was already processed (duplicate visit ID)
+                if visit_data['idVisit'] not in session_mapping:
+                    session_id, session_values = create_session_data(visit_data, website_id, session_mapping)
+                    session_batch.append(session_values)
+
+                # Generate visit ID for this session
+                visit_id = generate_uuid(f"visit_{visit_data['idVisit']}")
+
+                # Process actions (page views)
+                if 'actionDetails' in visit_data:
+                    for action in visit_data['actionDetails']:
+                        if action.get('type') == 'action':  # Page view
+                            event_values = create_website_event_data(action, visit_data, visit_id,
+                                                                     website_id, session_mapping)
+                            event_batch.append(event_values)
+                            events_count += 1
+
+            except Exception as e:
+                print(f"Error processing visit {visit_data.get('idVisit', 'unknown')} on {target_date}: {e}")
+                continue
+
+        # Write batches when they reach the batch size
+        if len(session_batch) >= batch_size:
+            write_batch_insert(output_file, 'session', session_columns, session_batch, batch_size)
+            session_batch = []
+
+        if len(event_batch) >= batch_size:
+            write_batch_insert(output_file, 'website_event', event_columns, event_batch, batch_size)
+            event_batch = []
+
+    # Write remaining batches
+    if session_batch:
+        write_batch_insert(output_file, 'session', session_columns, session_batch, batch_size)
+
+    if event_batch:
+        write_batch_insert(output_file, 'website_event', event_columns, event_batch, batch_size)
 
     return events_count
 
@@ -257,7 +327,8 @@ def parse_date(date_string: str) -> date:
 
 
 def migrate_matomo_to_umami(matomo_url: str, site_id: str, token_auth: str, website_id: str,
-                            start_date: date = None, end_date: date = None, output_file: str = "migration.sql"):
+                            start_date: date = None, end_date: date = None, output_file: str = "migration.sql",
+                            batch_size: int = 1000):
     console = Console()
 
     # Validate website_id is a valid UUID format
@@ -289,6 +360,7 @@ def migrate_matomo_to_umami(matomo_url: str, site_id: str, token_auth: str, webs
     info_table.add_row("🌐 Matomo URL:", matomo_url)
     info_table.add_row("🆔 Site ID:", site_id)
     info_table.add_row("📁 Output file:", output_file)
+    info_table.add_row("📦 Batch size:", f"{batch_size:,}")
 
     console.print(Panel(info_table, title="🚀 [bold green]Matomo to Umami Migration[/bold green]", border_style="green"))
 
@@ -297,61 +369,70 @@ def migrate_matomo_to_umami(matomo_url: str, site_id: str, token_auth: str, webs
     total_events = 0
     total_days_processed = 0
     failed_days = 0
+    all_data = []  # Store all data for batch processing
+
+    # Phase 1: Data Collection
+    console.print("\n[bold yellow]Phase 1: Collecting data from Matomo...[/bold yellow]")
+
+    with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TextColumn("•"),
+            TimeRemainingColumn(),
+            console=console,
+            transient=False
+    ) as progress:
+
+        collection_task = progress.add_task("[blue]Collecting data...", total=total_days)
+
+        current_date = start_date
+        day_counter = 0
+
+        while current_date <= end_date:
+            day_counter += 1
+            iso_date = current_date.strftime('%Y-%m-%d')
+
+            # Update progress description
+            progress.update(collection_task, description=f"[blue]Collecting {iso_date}...")
+
+            # Fetch data for this day
+            data = make_matomo_request(matomo_url, site_id, token_auth, iso_date)
+
+            if data is not None:
+                all_data.append((current_date, data))
+                total_days_processed += 1
+            else:
+                failed_days += 1
+
+            # Update progress
+            progress.update(collection_task, advance=1)
+
+            current_date += timedelta(days=1)
+
+    # Phase 2: SQL Generation
+    console.print(
+        f"\n[bold yellow]Phase 2: Generating SQL with batch inserts (batch size: {batch_size:,})...[/bold yellow]")
 
     try:
         with open(output_file, 'w', encoding='utf-8') as f:
             # Write header
-            f.write("-- Generated SQL migration from Matomo to Umami\n")
+            f.write("-- Generated SQL migration from Matomo to Umami (Batch Optimized)\n")
             f.write(f"-- Generated on: {datetime.now().isoformat()}\n")
             f.write(f"-- Website ID: {website_id}\n")
             f.write(f"-- Date range: {start_date} to {end_date}\n")
             f.write(f"-- Matomo URL: {matomo_url}\n")
             f.write(f"-- Site ID: {site_id}\n")
+            f.write(f"-- Batch size: {batch_size}\n")
             f.write("\n")
             f.write("BEGIN;\n")
             f.write("\n")
             f.write("SET client_encoding = 'UTF8';\n")
             f.write("\n")
 
-            # Progress tracking with Rich
-            with Progress(
-                    SpinnerColumn(),
-                    TextColumn("[progress.description]{task.description}"),
-                    BarColumn(),
-                    MofNCompleteColumn(),
-                    TextColumn("•"),
-                    TimeRemainingColumn(),
-                    console=console,
-                    transient=False
-            ) as progress:
-
-                main_task = progress.add_task("[green]Processing days...", total=total_days)
-
-                current_date = start_date
-                day_counter = 0
-
-                while current_date <= end_date:
-                    day_counter += 1
-                    iso_date = current_date.strftime('%Y-%m-%d')
-
-                    # Update progress description
-                    progress.update(main_task, description=f"[green]Processing {iso_date}...")
-
-                    # Fetch data for this day
-                    data = make_matomo_request(matomo_url, site_id, token_auth, iso_date)
-
-                    if data is not None:
-                        # Process and write SQL statements immediately
-                        day_events = process_day_data(data, current_date, website_id, session_mapping, f)
-                        total_events += day_events
-                        total_days_processed += 1
-                    else:
-                        failed_days += 1
-
-                    # Update progress
-                    progress.update(main_task, advance=1)
-
-                    current_date += timedelta(days=1)
+            # Process all data in batches
+            total_events = process_batch_data(all_data, website_id, session_mapping, f, batch_size)
 
             # Write footer
             f.write("COMMIT;\n")
@@ -361,6 +442,7 @@ def migrate_matomo_to_umami(matomo_url: str, site_id: str, token_auth: str, webs
             f.write(f"-- Total events: {total_events}\n")
             f.write(f"-- Days processed: {total_days_processed}\n")
             f.write(f"-- Failed days: {failed_days}\n")
+            f.write(f"-- Batch size used: {batch_size}\n")
 
     except Exception as e:
         console.print(f"[red]❌ Error writing SQL file: {e}[/red]")
@@ -375,6 +457,7 @@ def migrate_matomo_to_umami(matomo_url: str, site_id: str, token_auth: str, webs
     summary_table.add_row("❌ Failed days:", f"{failed_days:,}")
     summary_table.add_row("👥 Total sessions:", f"{len(session_mapping):,}")
     summary_table.add_row("📈 Total events:", f"{total_events:,}")
+    summary_table.add_row("📦 Batch size:", f"{batch_size:,}")
     if total_events > 0 and total_days_processed > 0:
         summary_table.add_row("📊 Avg events/day:", f"{total_events / total_days_processed:.1f}")
 
@@ -384,21 +467,21 @@ def migrate_matomo_to_umami(matomo_url: str, site_id: str, token_auth: str, webs
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Migrate Matomo analytics data directly to Umami SQL format',
+        description='Migrate Matomo analytics data to Umami SQL format with batch inserts',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Default: last 2 years
+  # Default: last 2 years with 1000 batch size
   python matomo2umami.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID>
   
-  # Custom date range
-  python matomo2umami.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> --start-date 2023-01-01 --end-date 2023-12-31
+  # Custom date range with custom batch size
+  python matomo2umami.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> --start-date 2023-01-01 --end-date 2023-12-31 --batch-size 500
   
   # With custom output file
   python matomo2umami.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> -o my_migration.sql
   
-  # Specific month
-  python matomo2umami.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> --start-date 2024-01-01 --end-date 2024-01-31
+  # Large batch size for better performance
+  python matomo2umami.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> --batch-size 5000
         """
     )
 
@@ -409,8 +492,14 @@ Examples:
     parser.add_argument('-o', '--output', help='Output SQL file path (default: migration.sql)', default='migration.sql')
     parser.add_argument('--start-date', type=parse_date, help='Start date in YYYY-MM-DD format (default: 2 years ago)')
     parser.add_argument('--end-date', type=parse_date, help='End date in YYYY-MM-DD format (default: today)')
+    parser.add_argument('--batch-size', type=int, default=1000, help='Batch size for INSERT statements (default: 1000)')
 
     args = parser.parse_args()
+
+    # Validate batch size
+    if args.batch_size < 1:
+        print("❌ Error: batch-size must be at least 1")
+        sys.exit(1)
 
     # Clean up Matomo URL (remove trailing slash)
     matomo_url = args.matomo_url.rstrip('/')
@@ -422,7 +511,8 @@ Examples:
         args.website_id,
         args.start_date,
         args.end_date,
-        args.output
+        args.output,
+        args.batch_size
     )
 
 
