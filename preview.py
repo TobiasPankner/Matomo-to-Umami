@@ -99,7 +99,6 @@ def execute_sql_statement(sql_statement, description="SQL statement"):
 
         if result.stdout.strip():
             console.print(f"[green]✅ {description} executed successfully[/green]")
-            console.print(f"[dim]Output: {result.stdout.strip()}[/dim]")
         else:
             console.print(f"[green]✅ {description} executed successfully[/green]")
 

@@ -1,6 +1,7 @@
 # Matomo to Umami Migration Tool
 
-A Python script that migrates analytics data from Matomo to Umami by generating SQL statements for direct database import.
+A Python script that migrates analytics data from Matomo to Umami by generating SQL statements for direct database
+import.
 
 ## Features
 
@@ -8,15 +9,18 @@ A Python script that migrates analytics data from Matomo to Umami by generating 
 - **Flexible Date Ranges**: Migrate specific time periods or default to last 2 years
 - **Data Preservation**: Maintains visitor sessions, browser info, location data, and referrer information
 
-##  Prerequisites
+## Prerequisites
 
 ### Software Requirements
+
 - Python 3.7+
 - Access to your Matomo instance
 - PostgreSQL database (Umami backend)
 
 ### Python Dependencies
+
 Install required packages:
+
 ```bash
 pip install -r requirements.txt
 ```
@@ -29,12 +33,11 @@ You need to generate an API authentication token from your Matomo dashboard.
 
 1. Log in to your Matomo dashboard
 2. Go to **Personal Settings** → **Security** → **Auth Tokens**
-3. Give it a descriptive name 
+3. Give it a descriptive name
 5. Untick the "Only allow secure requests" checkbox and click **Create New Token**
 6. Copy the generated token (you'll need this for the script)
 
 ![image](https://github.com/user-attachments/assets/ce532507-c9b9-4b34-9aa1-71880351782e)
-
 
 ### 2. Find Your Matomo Site ID
 
@@ -51,37 +54,42 @@ You need to generate an API authentication token from your Matomo dashboard.
 ## Usage
 
 ### Basic Usage (Last 2 Years)
+
 ```bash
 python matomo2umami.py https://your-matomo-url.com SITE_ID MATOMO_TOKEN UMAMI_WEBSITE_UUID
 ```
 
 ### Custom Date Range
+
 ```bash
 python matomo2umami.py https://your-matomo-url.com SITE_ID MATOMO_TOKEN UMAMI_WEBSITE_UUID --start-date 2023-01-01 --end-date 2023-12-31
 ```
 
 ### Custom Output File
+
 ```bash
 python matomo2umami.py https://your-matomo-url.com SITE_ID MATOMO_TOKEN UMAMI_WEBSITE_UUID -o my_migration.sql
 ```
 
 ### Complete Example
+
 ```bash
-python matomo2umami.py https://analytics.example.com 1 1234567890abcdef 550e8400-e29b-41d4-a716-446655440000 --start-date 2024-01-01 --end-date 2024-03-31 -o march_2024_migration.sql --batch-size 5000
+python matomo2umami.py https://analytics.example.com 1 1234567890abcdef 550e8400-e29b-41d4-a716-446655440000 --start-date 2024-01-01 --end-date 2024-03-31 -o march_2024_migration.sql --batch-size 5000 --days-per-request 10
 ```
 
 ## Command Line Arguments
 
-| Argument | Required | Description                                        | Example                                |
-|----------|----------|----------------------------------------------------|----------------------------------------|
-| `matomo_url` | ✅ | Your Matomo installation URL                       | `https://analytics.example.com`        |
-| `site_id` | ✅ | Matomo site ID (usually 1)                         | `1`                                    |
-| `token_auth` | ✅ | Matomo API authentication token                    | `1234567890abcdef`                     |
-| `website_id` | ✅ | Umami website UUID                                 | `550e8400-e29b-41d4-a716-446655440000` |
-| `-o, --output` | ❌ | Output SQL file path                               | `migration.sql` (default)              |
-| `--start-date` | ❌ | Start date (YYYY-MM-DD)                            | `2023-01-01`                           |
-| `--end-date` | ❌ | End date (YYYY-MM-DD)                              | `2023-12-31`                           |
-| `--batch-size` | ❌ | The batch size to use for the sql import statements | `1000` (default)                       |
+| Argument             | Required | Description                                              | Example                                |
+|----------------------|----------|----------------------------------------------------------|----------------------------------------|
+| `matomo_url`         | ✅        | Your Matomo installation URL                             | `https://analytics.example.com`        |
+| `site_id`            | ✅        | Matomo site ID (usually 1)                               | `1`                                    |
+| `token_auth`         | ✅        | Matomo API authentication token                          | `1234567890abcdef`                     |
+| `website_id`         | ✅        | Umami website UUID                                       | `550e8400-e29b-41d4-a716-446655440000` |
+| `-o, --output`       | ❌        | Output SQL file path                                     | `migration.sql` (default)              |
+| `--start-date`       | ❌        | Start date (YYYY-MM-DD)                                  | `2023-01-01`                           |
+| `--end-date`         | ❌        | End date (YYYY-MM-DD)                                    | `2023-12-31`                           |
+| `--batch-size`       | ❌        | The batch size to use for the sql import statements      | `1000` (default)                       |
+| `--days-per-request` | ❌        | How many days should be fetched with each Matomo request | `1` (default)                          |
 
 ## Output
 
@@ -108,7 +116,7 @@ psql -h localhost -U umami_user -d umami_db -f migration.sql
 
 1. Install docker compose
 2. Install psql
-3. Run 
+3. Run
     ```bash
     python preview.py
     ```

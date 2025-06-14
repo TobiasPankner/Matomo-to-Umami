@@ -232,14 +232,21 @@ def write_batch_insert(output_file, table_name: str, columns: List[str], values_
         output_file.write(sql)
 
 
-def make_matomo_request(matomo_url: str, site_id: str, token_auth: str, target_date: str):
-    """Make API request to Matomo for a single day"""
+def make_matomo_request(matomo_url: str, site_id: str, token_auth: str, start_date: str, end_date: str = None):
+    """Make API request to Matomo for a date range"""
+    date_param = start_date
+    period = "day"
+
+    if end_date and end_date != start_date:
+        date_param = f"{start_date},{end_date}"
+        period = "range"
+
     params = {
         'module': 'API',
         'method': 'Live.getLastVisitsDetails',
         'idSite': site_id,
-        'period': 'day',
-        'date': target_date,
+        'period': period,
+        'date': date_param,
         'format': 'JSON',
         'token_auth': token_auth,
         'filter_limit': -1
@@ -250,7 +257,7 @@ def make_matomo_request(matomo_url: str, site_id: str, token_auth: str, target_d
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        print(f"Error fetching data for {target_date}: {e}")
+        print(f"Error fetching data for {date_param}: {e}")
         return None
 
 
@@ -328,7 +335,7 @@ def parse_date(date_string: str) -> date:
 
 def migrate_matomo_to_umami(matomo_url: str, site_id: str, token_auth: str, website_id: str,
                             start_date: date = None, end_date: date = None, output_file: str = "migration.sql",
-                            batch_size: int = 1000):
+                            batch_size: int = 1000, days_per_request: int = 1):
     console = Console()
 
     # Validate website_id is a valid UUID format
@@ -361,6 +368,7 @@ def migrate_matomo_to_umami(matomo_url: str, site_id: str, token_auth: str, webs
     info_table.add_row("🆔 Site ID:", site_id)
     info_table.add_row("📁 Output file:", output_file)
     info_table.add_row("📦 Batch size:", f"{batch_size:,}")
+    info_table.add_row("🔄 Days per request:", f"{days_per_request:,}")
 
     console.print(Panel(info_table, title="🚀 [bold green]Matomo to Umami Migration[/bold green]", border_style="green"))
 
@@ -369,52 +377,24 @@ def migrate_matomo_to_umami(matomo_url: str, site_id: str, token_auth: str, webs
     total_events = 0
     total_days_processed = 0
     failed_days = 0
-    all_data = []  # Store all data for batch processing
 
-    # Phase 1: Data Collection
-    console.print("\n[bold yellow]Phase 1: Collecting data from Matomo...[/bold yellow]")
+    # Initialize batch containers
+    session_batch = []
+    event_batch = []
 
-    with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            TextColumn("•"),
-            TimeRemainingColumn(),
-            console=console,
-            transient=False
-    ) as progress:
+    # Define column names for SQL inserts
+    session_columns = [
+        'session_id', 'website_id', 'browser', 'os', 'device', 'screen', 'language',
+        'country', 'region', 'city', 'distinct_id', 'created_at'
+    ]
 
-        collection_task = progress.add_task("[blue]Collecting data...", total=total_days)
+    event_columns = [
+        'event_id', 'website_id', 'session_id', 'visit_id', 'created_at', 'url_path',
+        'url_query', 'referrer_path', 'referrer_query', 'referrer_domain', 'page_title',
+        'event_type', 'hostname'
+    ]
 
-        current_date = start_date
-        day_counter = 0
-
-        while current_date <= end_date:
-            day_counter += 1
-            iso_date = current_date.strftime('%Y-%m-%d')
-
-            # Update progress description
-            progress.update(collection_task, description=f"[blue]Collecting {iso_date}...")
-
-            # Fetch data for this day
-            data = make_matomo_request(matomo_url, site_id, token_auth, iso_date)
-
-            if data is not None:
-                all_data.append((current_date, data))
-                total_days_processed += 1
-            else:
-                failed_days += 1
-
-            # Update progress
-            progress.update(collection_task, advance=1)
-
-            current_date += timedelta(days=1)
-
-    # Phase 2: SQL Generation
-    console.print(
-        f"\n[bold yellow]Phase 2: Generating SQL with batch inserts (batch size: {batch_size:,})...[/bold yellow]")
-
+    # Open SQL file for writing
     try:
         with open(output_file, 'w', encoding='utf-8') as f:
             # Write header
@@ -425,14 +405,102 @@ def migrate_matomo_to_umami(matomo_url: str, site_id: str, token_auth: str, webs
             f.write(f"-- Matomo URL: {matomo_url}\n")
             f.write(f"-- Site ID: {site_id}\n")
             f.write(f"-- Batch size: {batch_size}\n")
+            f.write(f"-- Days per request: {days_per_request}\n")
             f.write("\n")
             f.write("BEGIN;\n")
             f.write("\n")
             f.write("SET client_encoding = 'UTF8';\n")
             f.write("\n")
 
-            # Process all data in batches
-            total_events = process_batch_data(all_data, website_id, session_mapping, f, batch_size)
+            # Process data day by day
+            console.print("\n[bold yellow]Collecting and processing data from Matomo...[/bold yellow]")
+
+            with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    MofNCompleteColumn(),
+                    TextColumn("•"),
+                    TimeRemainingColumn(),
+                    console=console,
+                    transient=False
+            ) as progress:
+                collection_task = progress.add_task("[blue]Processing data...", total=total_days)
+                current_date = start_date
+
+                while current_date <= end_date:
+                    # Calculate the end date for this batch (don't exceed the overall end_date)
+                    batch_end_date = min(current_date + timedelta(days=days_per_request - 1), end_date)
+
+                    iso_start_date = current_date.strftime('%Y-%m-%d')
+                    iso_end_date = batch_end_date.strftime('%Y-%m-%d')
+
+                    if iso_start_date == iso_end_date:
+                        progress.update(collection_task, description=f"[blue]Processing {iso_start_date}...")
+                    else:
+                        progress.update(collection_task,
+                                        description=f"[blue]Processing {iso_start_date} to {iso_end_date}...")
+
+                    # Fetch data for this date range
+                    data = make_matomo_request(matomo_url, site_id, token_auth, iso_start_date, iso_end_date)
+
+                    days_in_batch = (batch_end_date - current_date).days + 1
+                    days_processed_in_batch = 0
+
+                    if data is not None:
+                        # Process this batch's data immediately
+                        if isinstance(data, list):
+                            for visit_data in data:
+                                try:
+                                    # Skip if this session was already processed
+                                    if visit_data['idVisit'] not in session_mapping:
+                                        session_id, session_values = create_session_data(visit_data, website_id,
+                                                                                         session_mapping)
+                                        session_batch.append(session_values)
+
+                                        # Write session batch if it reaches the limit
+                                        if len(session_batch) >= batch_size:
+                                            write_batch_insert(f, 'session', session_columns, session_batch, batch_size)
+                                            session_batch = []
+
+                                    # Generate visit ID for this session
+                                    visit_id = generate_uuid(f"visit_{visit_data['idVisit']}")
+
+                                    # Process actions (page views)
+                                    if 'actionDetails' in visit_data:
+                                        for action in visit_data['actionDetails']:
+                                            if action.get('type') == 'action':  # Page view
+                                                event_values = create_website_event_data(action, visit_data, visit_id,
+                                                                                         website_id, session_mapping)
+                                                event_batch.append(event_values)
+                                                total_events += 1
+
+                                                # Write event batch if it reaches the limit
+                                                if len(event_batch) >= batch_size:
+                                                    write_batch_insert(f, 'website_event', event_columns, event_batch,
+                                                                       batch_size)
+                                                    event_batch = []
+
+                                except Exception as e:
+                                    console.print(
+                                        f"[dim]Error processing visit {visit_data.get('idVisit', 'unknown')} on {iso_start_date}: {e}[/dim]")
+                                    continue
+
+                            days_processed_in_batch = days_in_batch
+                        total_days_processed += days_processed_in_batch
+                    else:
+                        failed_days += days_in_batch
+
+                    # Update progress
+                    progress.update(collection_task, advance=days_in_batch)
+                    current_date = batch_end_date + timedelta(days=1)
+
+            # Write any remaining batches
+            if session_batch:
+                write_batch_insert(f, 'session', session_columns, session_batch, batch_size)
+
+            if event_batch:
+                write_batch_insert(f, 'website_event', event_columns, event_batch, batch_size)
 
             # Write footer
             f.write("COMMIT;\n")
@@ -443,6 +511,7 @@ def migrate_matomo_to_umami(matomo_url: str, site_id: str, token_auth: str, webs
             f.write(f"-- Days processed: {total_days_processed}\n")
             f.write(f"-- Failed days: {failed_days}\n")
             f.write(f"-- Batch size used: {batch_size}\n")
+            f.write(f"-- Days per request: {days_per_request}\n")
 
     except Exception as e:
         console.print(f"[red]❌ Error writing SQL file: {e}[/red]")
@@ -458,6 +527,7 @@ def migrate_matomo_to_umami(matomo_url: str, site_id: str, token_auth: str, webs
     summary_table.add_row("👥 Total sessions:", f"{len(session_mapping):,}")
     summary_table.add_row("📈 Total events:", f"{total_events:,}")
     summary_table.add_row("📦 Batch size:", f"{batch_size:,}")
+    summary_table.add_row("🔄 Days per request:", f"{days_per_request:,}")
     if total_events > 0 and total_days_processed > 0:
         summary_table.add_row("📊 Avg events/day:", f"{total_events / total_days_processed:.1f}")
 
@@ -473,15 +543,15 @@ def main():
 Examples:
   # Default: last 2 years with 1000 batch size
   python matomo2umami.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID>
-  
+
   # Custom date range with custom batch size
   python matomo2umami.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> --start-date 2023-01-01 --end-date 2023-12-31 --batch-size 500
-  
+
   # With custom output file
   python matomo2umami.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> -o my_migration.sql
-  
-  # Large batch size for better performance
-  python matomo2umami.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> --batch-size 5000
+
+  # Optimize API calls by fetching multiple days per request
+  python matomo2umami.py https://tracking.example.com 1 <MATOMO_TOKEN> <UMAMI_UID> --days-per-request 7
         """
     )
 
@@ -493,12 +563,19 @@ Examples:
     parser.add_argument('--start-date', type=parse_date, help='Start date in YYYY-MM-DD format (default: 2 years ago)')
     parser.add_argument('--end-date', type=parse_date, help='End date in YYYY-MM-DD format (default: today)')
     parser.add_argument('--batch-size', type=int, default=1000, help='Batch size for INSERT statements (default: 1000)')
+    parser.add_argument('--days-per-request', type=int, default=1,
+                        help='Number of days to fetch in a single API request (default: 1)')
 
     args = parser.parse_args()
 
     # Validate batch size
     if args.batch_size < 1:
         print("❌ Error: batch-size must be at least 1")
+        sys.exit(1)
+
+    # Validate days per request
+    if args.days_per_request < 1:
+        print("❌ Error: days-per-request must be at least 1")
         sys.exit(1)
 
     # Clean up Matomo URL (remove trailing slash)
@@ -512,7 +589,8 @@ Examples:
         args.start_date,
         args.end_date,
         args.output,
-        args.batch_size
+        args.batch_size,
+        args.days_per_request
     )
 
 
